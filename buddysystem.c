@@ -129,15 +129,12 @@ bb_page_t *bb_alloc_pages(bb_instance_t *instance, unsigned int order)
     // starting with the list for the requested order and
     // continuing if necessary to larger orders.
     unsigned int current_order;
-    for (current_order = order; current_order < MAX_BUDDYSYSTEM_GFP_ORDER; ++current_order) {
-        // Get the free_area_t at index 'current_order'.
+    for (current_order = order; current_order < MAX_BUDDYSYSTEM_GFP_ORDER; current_order++){
         area = __get_area_of_order(instance, current_order);
-        // Check if area is not empty, which means that there is at least a block inside the list.
-        if (!list_head_empty(&area->free_list)) {
+        if(!list_head_empty(&area->free_list)){
             goto block_found;
         }
     }
-
     // No suitable free block has been found.
     return NULL;
 
@@ -146,71 +143,54 @@ block_found:
     // pages. Recall, free_area_t collects the first page_t of each free block
     // of 2^order contiguous page frames.
     page = list_entry(area->free_list.next, bb_page_t, location.siblings);
+    //remove the page from the list of area's free pages
+    list_head_remove(&page->location.siblings);
 
-    // Remove the descriptor of its first page frame.
-    list_head_remove(&(page->location.siblings));
+    //reduce the number of free blocks of the area
+    area->nr_free--;
 
-    // Set the page as allocated, thus, remove the flag FREE_PAGE.
+    //check that the page is actually a root one and free
+    assert(__bb_test_flag(page, FREE_PAGE) && __bb_test_flag(page, ROOT_PAGE));
+
+    //set the page as not free
     __bb_clear_flag(page, FREE_PAGE);
 
-    // Check that the page is a ROOT_PAGE
-    assert(__bb_test_flag(page, ROOT_PAGE));
-
-    // Decrease the number of free block of the free_area_t.
-    area->nr_free -= 1;
-
-    // Found a block of 2^k page frames, to satisfy a request
-    // for 2^h page frames (h < k) the program allocates
-    // the first 2^h page frames and iteratively reassigns
-    // the last 2^k – 2^h page frames to the free_area lists
-    // that have indexes between h and k.
-    unsigned int size = 1UL << current_order;
-    while (current_order > order) {
-        // At each loop, we have to set free the right half of the found block.
-
-        // Split the block and set free the second half.
-        size >>= 1; //right shift logical by 1 bit
-
-        // Get the address of the page in the midle of the found block.
-        bb_page_t *buddy = __get_page_from_base(instance, page, size);
-        
-        // Check that the buddy is free and not a root page.
-        assert(!__bb_test_flag(buddy, ROOT_PAGE) && __bb_test_flag(buddy, FREE_PAGE));
-
-        // Save the order of the buddy.
-        buddy->order = --current_order;
-
-        // Set the buddy as a root page.
-        __bb_set_flag(buddy, ROOT_PAGE );
-
-        //new area
+    //while we are above the order required, we take the buddy and put it in the lower area as free
+    unsigned long size = 1UL << current_order;
+    while(current_order > order){
+        //new order, we act on the lower order to insert the buddy
+        current_order--; 
         area = __get_area_of_order(instance, current_order);
 
-        // Insert buddy as first element in the list of available blocks (free_list).
-        list_head_insert_before(&buddy->location.siblings, &area->free_list);
+        //changed order, the size is halved
+        size = size/2;
 
-        // Increase the number of free block of the free_area_t.
-        area->nr_free += 1;
+        //get the buddy, that is current_order pages after the root 
+        bb_page_t *buddy = __get_page_from_base(instance, page, size);
+        
+        //check that the buddy is a valid one
+        assert(__bb_test_flag(buddy, FREE_PAGE) && !__bb_test_flag(buddy, ROOT_PAGE));
+
+        //set the buddy as correct order, as a root and add it to the current area's free list
+        buddy->order = current_order;
+        __bb_set_flag(buddy, ROOT_PAGE);
+        list_head_insert_after(&buddy->location.siblings, &area->free_list);
+
+        //increase the current area free blocks
+        area->nr_free++;
 
     }
 
-    // Set the order of the page we are returning.
-    page->order = current_order;
+    //set the page order
+    page->order = order;
 
-    // Set the page as root page.
-    __bb_set_flag(page, ROOT_PAGE );
-
-    // Clear the free-page status from the page.
-    __bb_clear_flag(page, FREE_PAGE);
-
-#if 0
-    buddy_system_dump(instance);
-#endif
     return page;
 }
 
 void bb_free_pages(bb_instance_t *instance, bb_page_t *page)
 {
+    bb_free_area_t *area = NULL;
+
     // Take the first page descriptor of the zone.
     bb_page_t *base = instance->base_page;
     // Take the page frame index of page compared to the zone.
@@ -219,68 +199,57 @@ void bb_free_pages(bb_instance_t *instance, bb_page_t *page)
     // field because we want to try to merge. 
     unsigned int order = page->order;
 
-    // Check that the page is free, or that it is not a root page.
+    // Check that the page is used, or that it is not a root page.
     if (__bb_test_flag(page, FREE_PAGE) || !__bb_test_flag(page, ROOT_PAGE)) {
         kernel_panic("Double deallocation in buddy system!");
     }
 
-    // Performs a cycle that starts with the smallest
-    // order block and moves up to the top order.
-    while (order < MAX_BUDDYSYSTEM_GFP_ORDER - 1) {
+    //mark as free
+    __bb_set_flag(page, FREE_PAGE);
 
-        // Get the index of the buddy.
+    while (order < MAX_BUDDYSYSTEM_GFP_ORDER -1){
+
+        //get area in which we operate
+        area = __get_area_of_order(instance, order);
+
+        //get new page because we could have a new address in case the buddy is on the lower adddresses
+        page = __get_page_from_base(instance, base, page_idx);
+
+        //get buddy
         unsigned long buddy_idx = __get_buddy_at_index(page_idx, order);
-
-        // Return the page descriptor of the buddy.
         bb_page_t *buddy = __get_page_from_base(instance, base, buddy_idx);
 
-        // If the page is not a buddy, stop the loop. So it should not be free
-        // and having the same size.
-        if (!(__bb_test_flag(buddy, FREE_PAGE) && (buddy->order == page->order)))
+        //if the page is not a buddy (not free and/or not of the same order), stop
+        if(!__page_is_buddy(buddy, order)){
             break;
+        }
 
-        // If buddy is free, remove buddy from the current free list,
-        // because then the coalesced block will be inserted on a
-        // upper order.
+        //remove the buddy from the area
         list_head_remove(&buddy->location.siblings);
+        area->nr_free--;
 
-        // Decrease the number of free block of the current free_area_t.
-        instance->free_area[order].nr_free--;
+        //clear page and buddy root flag
+        __bb_clear_flag(buddy, ROOT_PAGE);
+        __bb_clear_flag(page, ROOT_PAGE);
 
-        // Get the page that gets forgotten, it's always the one on the right (the greatest)
-        bb_page_t *forgot_page = buddy > page ? buddy : page;
-
-        // Clear the root flag from the forgotten page.
-        __bb_clear_flag(forgot_page, ROOT_PAGE);
-
-        // Set the forgotten page as a free page.
-        __bb_set_flag(forgot_page, FREE_PAGE);
-
-        // Update the page index with the index of the coalesced block.
+        //page_idx becomes the lower address between the two
         page_idx &= buddy_idx;
 
         order++;
     }
 
-    // Take the coalesced block with the order reached up.
-    bb_page_t *coalesced = __get_page_from_base(instance, base, page_idx);
+    //get the final block and set the first page as free and root
+    page = __get_page_from_base(instance, base, page_idx);
+    __bb_set_flag(page, ROOT_PAGE);
+    __bb_set_flag(page, ROOT_PAGE);
 
-    // Update the order of the coalesced page.
-    coalesced->order = order;
+    //set page order
+    page->order = order;
 
-    // Set it to be a root page and a free page
-    __bb_set_flag(coalesced, ROOT_PAGE);
-    __bb_set_flag(coalesced, FREE_PAGE);
+    //insert in the first position of the free list
+    area = __get_area_of_order(instance, order);
+    list_head_insert_after(&page->location.siblings, &area->free_list);
 
-    // Insert coalesced as first element in the free list.
-    list_head_insert_before(&coalesced->location.siblings, &(instance->free_area[order].free_list));
-
-    // Increase the number of free block of the free_area_t.
-    instance->free_area[order].nr_free++;
-
-#if 0
-    buddy_system_dump(instance);
-#endif
 }
 
 void buddy_system_init(bb_instance_t *instance,
