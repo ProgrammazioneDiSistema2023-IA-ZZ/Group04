@@ -241,7 +241,7 @@ void bb_free_pages(bb_instance_t *instance, bb_page_t *page)
     //get the final block and set the first page as free and root
     page = __get_page_from_base(instance, base, page_idx);
     __bb_set_flag(page, ROOT_PAGE);
-    __bb_set_flag(page, ROOT_PAGE);
+    __bb_set_flag(page, FREE_PAGE);
 
     //set page order
     page->order = order;
