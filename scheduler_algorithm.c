@@ -2,6 +2,7 @@
 /// @brief Round Robin algorithm.
 /// @copyright (c) 2014-2022 This file is distributed under the MIT License.
 /// See LICENSE.md for details.
+/// Scheduler algorithms completion/implementation by matitaviola (except RR)
 
 // Include the kernel log levels.
 #include "sys/kernel_levels.h"
@@ -17,6 +18,7 @@
 #include "klib/list_head.h"
 #include "process/wait.h"
 #include "process/scheduler.h"
+#include "limits.h"
 
 /// @brief Updates task execution statistics.
 /// @param task the task to update.
@@ -73,23 +75,6 @@ static inline task_struct *__scheduler_rr(runqueue_t *runqueue, bool_t skip_peri
 /// @param skip_periodic tells the algorithm if there are periodic processes in
 /// the list, and in that case it needs to skip them.
 /// @return the next task on success, NULL on failure.
-/// @details
-/// When implementing this algorithm, beware of the following pitfal. If you
-/// have the following runqueue (reports task position in the runqueue, priority
-/// and name):
-///      Position | Priority | Name
-///          1    |    120   | init
-///          2    |    120   | shell
-///          3    |    122   | echo
-///          4    |    128   | ps
-/// If you pick the first task every time (i.e., init), and use its prio (i.e.,
-/// 120), what would happen if inside the for-loop when you check "if the entry
-/// has a lower priority", you use a lesser-than sign?
-/// First, it will check against init itself, so 120 < 120 is false. 
-/// Then, it will check against shell, again, 120 < 120 is false.
-/// As such, shell or the other processes will never be selected. There are
-/// different ways of solving this problem, each of which requires changes only
-/// inside this same function. Good luck.
 static inline task_struct *__scheduler_priority(runqueue_t *runqueue, bool_t skip_periodic)
 {
 #ifdef SCHEDULER_PRIORITY
@@ -97,10 +82,15 @@ static inline task_struct *__scheduler_priority(runqueue_t *runqueue, bool_t ski
     task_struct *next = list_entry(runqueue->queue.next, struct task_struct, run_list);
 
     // Get its static priority.
-    time_t min = /*...*/;
+    time_t min = next->se.prio;
+
+    // If there is just one task, return it; no need to do anything.
+    if (list_head_size(&runqueue->curr->run_list) <= 1) {
+        return runqueue->curr;
+    }
 
     // Search for the task with the smallest static priority.
-    list_for_each_decl(it, &runqueue->queue)
+    list_for_each_decl(it, &runqueue->curr->run_list)
     {
         // Check if we reached the head of list_head, and skip it.
         if (it == &runqueue->queue)
@@ -114,9 +104,9 @@ static inline task_struct *__scheduler_priority(runqueue_t *runqueue, bool_t ski
         if (__is_periodic_task(entry) && skip_periodic)
             continue;
         // Check if the entry has a lower priority.
-        if (/*...*/) {
-            // Chose the `entry` as the `next` task.
-            /*...*/
+        if (entry->se.prio <= min) {
+                next = entry;
+                min = entry->se.prio;
         }
     }
     return next;
@@ -124,6 +114,7 @@ static inline task_struct *__scheduler_priority(runqueue_t *runqueue, bool_t ski
     return __scheduler_rr(runqueue, skip_periodic);
 #endif
 }
+
 
 /// @brief It aims at giving a fair share of CPU time to processes, and achieves
 /// that by associating a virtual runtime to each of them. It always tries to
@@ -136,15 +127,21 @@ static inline task_struct *__scheduler_priority(runqueue_t *runqueue, bool_t ski
 /// @return the next task on success, NULL on failure.
 static inline task_struct *__scheduler_cfs(runqueue_t *runqueue, bool_t skip_periodic)
 {
-#ifdef SCHEDULER_CFS
+
     // Get the first element of the list.
     task_struct *next = list_entry(runqueue->queue.next, struct task_struct, run_list);
 
+
     // Get its virtual runtime.
-    time_t min = /* ... */;
+    time_t min = next->se.vruntime;
+
+    // If there is just one task, return it; no need to do anything.
+    if (list_head_size(&runqueue->curr->run_list) <= 1) {
+        return runqueue->curr;
+    }
 
     // Search for the task with the smallest vruntime value.
-    list_for_each_decl(it, &runqueue->queue)
+    list_for_each_decl(it, &runqueue->curr->run_list)
     {
         // Check if we reached the head of list_head, and skip it.
         if (it == &runqueue->queue)
@@ -159,12 +156,12 @@ static inline task_struct *__scheduler_cfs(runqueue_t *runqueue, bool_t skip_per
             continue;
 
         // Check if the element in the list has a smaller vruntime value.
-        /* ... */
+        if (entry->se.vruntime < min) {
+            next = entry;
+            min = entry->se.vruntime;
+        }
     }
     return next;
-#else
-    return __scheduler_rr(runqueue, skip_periodic);
-#endif
 }
 
 /// @brief Executes the task with the earliest absolute deadline among all the
@@ -173,7 +170,35 @@ static inline task_struct *__scheduler_cfs(runqueue_t *runqueue, bool_t skip_per
 /// @return the next task on success, NULL on failure.
 static inline task_struct *__scheduler_aedf(runqueue_t *runqueue)
 {
-    return __scheduler_rr(runqueue, false);
+    //pointer to the next task
+    task_struct *next = NULL, *entry;
+
+    //the next deadline, starting from the maximum possible one
+    time_t next_dl = UINT_MAX;
+
+    list_for_each_decl(it, &runqueue->queue){
+
+        //if we're at the head, we skip it
+        if(it == &runqueue->queue)
+            continue;
+
+        entry = list_entry(it, task_struct, run_list);
+
+        //check that it's not an entry with deadline 0
+        if(entry->se.deadline != 0){
+            if(entry->se.deadline <= next_dl){
+                next = entry;
+                next_dl = next->se.deadline;
+            }
+        }
+    }
+
+    //then if i haven't found a valid "real time" task, i use the CFS
+    if(next == NULL)
+        next = __scheduler_cfs(runqueue, true); //true = skips periodic tasks
+
+    return next;
+    
 }
 
 /// @brief Executes the task with the earliest absolute DEADLINE among all the
@@ -184,7 +209,49 @@ static inline task_struct *__scheduler_aedf(runqueue_t *runqueue)
 /// @return the next task on success, NULL on failure.
 static inline task_struct *__scheduler_edf(runqueue_t *runqueue)
 {
-    return __scheduler_rr(runqueue, false);
+    //pointer to the next task
+    task_struct *next = NULL, *entry;
+
+    //the next deadline, starting from the maximum possible one
+    time_t next_dl = UINT_MAX;
+
+    //iterate over the tasks list looking for the mimimum deadline
+    list_for_each_decl(it, &runqueue->queue){
+
+        //if we're at the head, we skip it
+        if(it == &runqueue->queue)
+            continue;
+        
+        //gets the task_struct from the list node
+        entry = list_entry(it, task_struct, run_list);
+
+        //we skip non-period tasks or a periodic task that's still undergoing schedulability analysis
+        if(!entry->se.is_periodic || entry->se.is_under_analysis)
+            continue;
+        
+        /*
+        if the entry has already been executed and the time period is starting again
+        I mark it as executable again and update the periods
+        */
+        if(entry->se.executed && (entry->se.next_period <= timer_get_ticks())){
+
+            entry->se.executed = false;
+            entry->se.deadline += entry->se.period;
+            entry->se.next_period += entry->se.period;
+
+        }//if it's not marked as executed I check if it's the closest deadline
+        else if(!entry->se.executed && (entry->se.deadline < next_dl)){
+            next = entry;
+            next_dl = next->se.deadline;
+        }
+
+    }
+
+    //then if i haven't found a valid periodic task, i use the CFS
+    if(next == NULL)
+        next = __scheduler_cfs(runqueue, true); //true = skips periodic tasks
+
+    return next;
 }
 
 /// @brief Executes the task with the earliest next PERIOD among all the ready
@@ -196,13 +263,52 @@ static inline task_struct *__scheduler_edf(runqueue_t *runqueue)
 /// @return the next task on success, NULL on failure.
 static inline task_struct *__scheduler_rm(runqueue_t *runqueue)
 {
-    return __scheduler_rr(runqueue, false);
+    //pointer to the next task
+    task_struct *next = NULL, *entry;
+
+    //the next period, starting from the maximum possible one
+    time_t next_np = UINT_MAX;
+
+    //iterate over the tasks list looking for the closest next period
+    list_for_each_decl(it, &runqueue->queue){
+
+        //if we're at the head, we skip it
+        if(it == &runqueue->queue)
+            continue;
+        
+        //gets the task_struct from the list node
+        entry = list_entry(it, task_struct, run_list);
+
+        //we skip non-period tasks or a periodic task that's still undergoing schedulability analysis
+        if(!entry->se.is_periodic || entry->se.is_under_analysis)
+            continue;
+
+        if(entry->se.executed && (entry->se.next_period <= timer_get_ticks())){
+
+            entry->se.executed = false;
+            entry->se.deadline += entry->se.period;
+            entry->se.next_period += entry->se.period;
+
+        }//if it's not marked as executed I check if it's the closest deadline
+        else if(!entry->se.executed && (entry->se.next_period < next_np)){
+            next = entry;
+            next_np = next->se.next_period;
+        }
+    }
+
+    //then if i haven't found a valid periodic task, i use the CFS
+    if(next == NULL)
+        next = __scheduler_cfs(runqueue, true); //true = skips periodic tasks
+
+    return next;
 }
 
 task_struct *scheduler_pick_next_task(runqueue_t *runqueue)
 {
     // Update task statistics.
+#if (defined(SCHEDULER_CFS) || defined(SCHEDULER_EDF) || defined(SCHEDULER_RM) || defined(SCHEDULER_AEDF))
     __update_task_statistics(runqueue->curr);
+#endif
 
     // Pointer to the next task to schedule.
     task_struct *next = NULL;
@@ -233,7 +339,6 @@ task_struct *scheduler_pick_next_task(runqueue_t *runqueue)
 static void __update_task_statistics(task_struct *task)
 {
     // See `prio.h` for more support functions.
-#if defined(SCHEDULER_CFS) || defined(SCHEDULER_EDF) || defined(SCHEDULER_RM) || defined(SCHEDULER_AEDF)
     assert(task && "Current task is not valid.");
 
     // While periodic task is under analysis is executed with aperiodic
@@ -252,16 +357,15 @@ static void __update_task_statistics(task_struct *task)
     // If the task is not a periodic task we have to update the virtual runtime.
     if (!task->se.is_periodic) {
         // Get the weight of the current task.
-        time_t weight = /* ... */;
+        time_t weight = GET_WEIGHT(task->se.prio);
         // If the weight is different from the default load, compute it.
         if (weight != NICE_0_LOAD) {
             // Get the multiplicative factor for its delta_exec.
-            double factor = /* ... */;
+            double factor = ((double)NICE_0_LOAD)/((double)weight);
             // Weight the delta_exec with the multiplicative factor.
-            task->se.exec_runtime = /* ... */;
+            task->se.exec_runtime = (int)(((double)task->se.exec_runtime)*factor);
         }
         // Update vruntime of the current task.
-        task->se.vruntime += /* ... */;
+        task->se.vruntime += task->se.exec_runtime;
     }
-#endif
 }
