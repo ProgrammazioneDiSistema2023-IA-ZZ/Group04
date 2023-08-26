@@ -303,10 +303,66 @@ static inline task_struct *__scheduler_rm(runqueue_t *runqueue)
     return next;
 }
 
+/// @brief Executes the task with the least laxity among all the ready
+/// tasks.
+/// @details LLF is an algorithm that considers the "laxity" of tasks, 
+/// which is the difference between a task's deadline and its remaining execution time. 
+/// The task with the least laxity is given the highest priority. 
+/// This approach aims to minimize the number of missed deadlines.
+/// @param runqueue list of all processes.
+/// @return the next task on success, NULL on failure.
+static inline task_struct *__scheduler_llf(runqueue_t *runqueue)
+{
+    //pointer to the next task
+    task_struct *next = NULL, *entry;
+
+    //the next period, starting from the maximum possible one
+    time_t min_lax = UINT_MAX;
+
+    //iterate over the tasks list looking for the closest next period
+    list_for_each_decl(it, &runqueue->queue){
+
+        //if we're at the head, we skip it
+        if(it == &runqueue->queue)
+            continue;
+        
+        //gets the task_struct from the list node
+        entry = list_entry(it, task_struct, run_list);
+
+        //we skip non-period tasks or a periodic task that's still undergoing schedulability analysis
+        if(!entry->se.is_periodic || entry->se.is_under_analysis)
+            continue;
+
+        if(entry->se.executed && (entry->se.next_period <= timer_get_ticks())){
+
+            entry->se.executed = false;
+            entry->se.deadline += entry->se.period;
+            entry->se.next_period += entry->se.period;
+
+        }//if it's not marked as executed I check if it's the least laxed
+        else if(!entry->se.executed){
+            //get's how much time till the deadline
+            //laxity = remaining time - total execution time up to now
+            int this_lax = (entry->se.deadline - timer_get_ticks()) - entry->se.sum_exec_runtime;
+            if(this_lax < min_lax){
+                next = entry;
+                min_lax = this_lax;
+            }
+        }
+    }
+
+    //then if i haven't found a valid real time task, i use the CFS
+    if(next == NULL)
+        next = __scheduler_cfs(runqueue, true); //true = skips periodic tasks
+
+    return next;
+}
+
+
 task_struct *scheduler_pick_next_task(runqueue_t *runqueue)
 {
     // Update task statistics.
-#if (defined(SCHEDULER_CFS) || defined(SCHEDULER_EDF) || defined(SCHEDULER_RM) || defined(SCHEDULER_AEDF))
+#if (defined(SCHEDULER_CFS) || defined(SCHEDULER_EDF) || defined(SCHEDULER_RM) || defined(SCHEDULER_AEDF) || defined(SCHEDULER_LLF))
     __update_task_statistics(runqueue->curr);
 #endif
 
@@ -324,6 +380,8 @@ task_struct *scheduler_pick_next_task(runqueue_t *runqueue)
     next = __scheduler_rm(runqueue);
 #elif defined(SCHEDULER_AEDF)
     next = __scheduler_aedf(runqueue);
+#elif defined(SCHEDULER_LLF)
+    next = __scheduler_llf(runqueue);
 #else
 #error "You should enable a scheduling algorithm!"
 #endif
