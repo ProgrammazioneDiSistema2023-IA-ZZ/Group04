@@ -25,7 +25,7 @@ Per ulteriori informazioni su questa parte, si rimanda alle slides (anch'esse di
  ### Ulteriore Materiale
 Nella repository è presente un file **zip** contenente la versione modificata di MentOS con i cambiamenti apportati.  
 Di seguito il link di google drive (causa dimensioni troppo grandi per github) ad un'immagine Ubuntu con i medesimi file:  
-https://drive.google.com/file/d/12WrPPwSJ76cyAfXeqSQ4csReAsZTbsnt/view?usp=sharing
+https://drive.google.com/file/d/12WrPPwSJ76cyAfXeqSQ4csReAsZTbsnt/view?usp=sharing  
 L'account e la password di Ubuntu sono entrambe **politoPDS**. 
 I file necessari alla compilazione sono contenuti all'interno della cartella **home/PDS_Project/mentos_buddy_scheduler_with_lls**  
 Per quanto riguarda la compilazione del sistema, ci limitiamo a riportare il link alla documentazione ufficiale: https://mentos-team.github.io/doc/doxygen/index.html. Si noti che tutti i programmi necessari alla compilazione sono già installati nella macchina.  
